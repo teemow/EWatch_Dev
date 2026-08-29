@@ -24,6 +24,7 @@
 #include "petview.h"
 #include "island.h"
 #include "doom.h"
+#include "gallery.h"
 #if defined(EWATCH_ENABLE_SPOTIFY) && EWATCH_ENABLE_SPOTIFY && \
     defined(EWATCH_ENABLE_WIFI) && EWATCH_ENABLE_WIFI
   #include "spotify.h"
@@ -47,8 +48,9 @@ static const AuraEntry kTopApps[] = {
 #if defined(EWATCH_ENABLE_QR) && EWATCH_ENABLE_QR
   { "QR Share",  Icon::QR,        aura::kBlue,   Screen::QRCode,      nullptr },
 #endif
+  { "Photos",    Icon::Photo,     aura::kPink,   Screen::Gallery,     nullptr },
 #if defined(EWATCH_ENABLE_MEDIA) && EWATCH_ENABLE_MEDIA
-  { "Media",     Icon::Photo,     aura::kPink,   Screen::Media,       nullptr },
+  { "Media",     Icon::Photo,     aura::kPurple, Screen::Media,       nullptr },
 #endif
 #if defined(EWATCH_ENABLE_VIEWER3D) && EWATCH_ENABLE_VIEWER3D
   { "3D Viewer", Icon::Cube,      aura::kPurple, Screen::Viewer3D,    nullptr },
@@ -112,6 +114,7 @@ static BoidsView     vBoids;
 static TunnelRacerView    vTunnel;
 static StarfoxShooterView vStarfox;
 static PetView            vPet;
+static GalleryView        vGallery;
 static IslandView         vIsland;
 #if defined(EWATCH_ENABLE_SPOTIFY) && EWATCH_ENABLE_SPOTIFY && \
     defined(EWATCH_ENABLE_WIFI) && EWATCH_ENABLE_WIFI
@@ -160,6 +163,7 @@ View *viewFor(Screen s) {
     case Screen::TunnelRacer:     return &vTunnel;
     case Screen::Starfox:         return &vStarfox;
     case Screen::Tamagotchi:      return &vPet;
+    case Screen::Gallery:         return &vGallery;
     case Screen::Island:          return &vIsland;
     case Screen::Racer:           return racerViewPtr();
     case Screen::Doom:            return doomViewPtr();

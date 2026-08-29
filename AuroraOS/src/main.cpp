@@ -24,6 +24,7 @@
 #include "storage.h"
 #include "apptimer.h"
 #include "wifi_svc.h"
+#include "photo_store.h"
 #if defined(EWATCH_ENABLE_SPOTIFY) && EWATCH_ENABLE_SPOTIFY && \
     defined(EWATCH_ENABLE_WIFI) && EWATCH_ENABLE_WIFI
   #include "spotify.h"
@@ -380,6 +381,7 @@ void setup() {
   controllerInit();
   EWLOGD("SYS", "init stage=controller");
   ewlogMountFs();               // LittleFS ring sink + RTC-mirror persist
+  photoStoreInit();             // /img scan + background selection (needs FS)
   EWLOGD("SYS", "init stage=fs");
   powerInit();                  // power config from NVS; 80 MHz base clock
   if (gSafeMode) {

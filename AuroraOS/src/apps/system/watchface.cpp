@@ -35,6 +35,7 @@
 #include "wifi_svc.h"
 #include "system_views.h"
 #include "smicon_bg.h"
+#include "photo_store.h"
 
 using namespace aura;
 
@@ -46,7 +47,7 @@ static const FaceStyle kFaces[] = {
   { "Aurora",  &FreeSans12pt7b },
   { "Analog",  &FreeSans12pt7b },
   { "Orbit",   &FreeSans12pt7b },
-  { "SM Logo", &FreeSans12pt7b },
+  { "Photo",   &FreeSans12pt7b },
   { "Mono",    &FreeMono12pt7b },
 };
 static const int kNumFaces = sizeof(kFaces) / sizeof(kFaces[0]);
@@ -383,10 +384,23 @@ private:
     drawWifiToggle(auraTheme(), sn);
   }
 
-  // ---- face 3: SM Logo (the ScrubMarine classic) ----
+  // ---- face 3: Photo (user background; SM Logo watermark as fallback) ----
   void faceLogo(const AuraTheme &th, const Snap &sn) {
-    canvas->draw16bitRGBBitmap(0, 0, (uint16_t *)SMICON_BG,
-                               SMICON_BG_W, SMICON_BG_H);
+    const uint16_t *bg = photoBgGet();
+    if (bg) {
+      memcpy(canvas->getFramebuffer(), bg, (size_t)W * H * 2);
+      // Soft scrim behind the time so it reads on any photo: darken a band by
+      // halving each RGB565 channel (fast shift-and-mask per pixel).
+      uint16_t *fb = canvas->getFramebuffer();
+      for (int y = 52; y < 132; y++) {
+        uint16_t *row = fb + (size_t)y * W;
+        for (int x = 0; x < W; x++)
+          row[x] = (row[x] >> 1) & 0x7BEF;
+      }
+    } else {
+      canvas->draw16bitRGBBitmap(0, 0, (uint16_t *)SMICON_BG,
+                                 SMICON_BG_W, SMICON_BG_H);
+    }
     char tbuf[8];
     snprintf(tbuf, sizeof tbuf, "%02u:%02u", sn.rtcOk ? sn.h : 0,
              sn.rtcOk ? sn.m : 0);

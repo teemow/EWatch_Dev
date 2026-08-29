@@ -176,6 +176,19 @@ static void prepHttp(HTTPClient &h) {
   h.setTimeout(HTTP_READ_MS);
   h.setReuse(false);
 }
+
+// Persistent connection to api.spotify.com — the handshake is the latency.
+static WiFiClientSecure *apiClient = nullptr;
+static WiFiClientSecure *apiConn() {
+  if (!apiClient) {
+    apiClient = new WiFiClientSecure();
+    prepTls(*apiClient);
+  }
+  return apiClient;
+}
+static void apiConnDrop() {
+  if (apiClient) { apiClient->stop(); }
+}
 // A connection/TLS error (negative) or a 5xx is worth retrying; auth/4xx and
 // 429 are definitive for the caller to handle (no blind retry).
 static bool httpTransient(int code) { return code <= 0 || code >= 500; }
@@ -190,10 +203,14 @@ struct HttpResp { int status; String body; int retryAfter; };
 static HttpResp httpDo(const char *method, const String &url, const String &body,
                        const char *contentType, const char *bearer, int maxTries) {
   HttpResp r; r.status = 0; r.retryAfter = 0;
+  bool api = url.startsWith("https://api.spotify.com");
   for (int attempt = 1; attempt <= maxTries; attempt++) {
     esp_task_wdt_reset();
-    WiFiClientSecure client; prepTls(client);
+    WiFiClientSecure localClient;
+    WiFiClientSecure &client = api ? *apiConn() : localClient;
+    if (!api) prepTls(localClient);
     HTTPClient https; prepHttp(https);
+    if (api) https.setReuse(true);       // keep the TLS session across calls
     if (!https.begin(client, url)) { r.status = -1; vTaskDelay(pdMS_TO_TICKS(250)); continue; }
     if (bearer && bearer[0]) https.addHeader("Authorization", String("Bearer ") + bearer);
     if (body.length()) https.addHeader("Content-Type", contentType ? contentType : "application/json");
@@ -208,6 +225,7 @@ static HttpResp httpDo(const char *method, const String &url, const String &body
     if (code > 0)    r.body = https.getString();
     https.end();
     if (!httpTransient(code)) return r;
+    if (api) apiConnDrop();              // stale keep-alive: force a fresh handshake
     Serial.printf("SPOT: %s transient %d (try %d/%d)\n", method, code, attempt, maxTries);
     if (attempt < maxTries) vTaskDelay(pdMS_TO_TICKS(300 * attempt));
   }
@@ -508,12 +526,55 @@ static int control(const char *method, const String &path, const String &body) {
 
 static inline bool ok2xx(int s) { return s >= 200 && s < 300; }
 
+// GET /v1/me/player/devices, pick the best candidate (active > computer >
+// first listed), then PUT /v1/me/player/play?device_id=… — Spotify treats a
+// targeted play as transfer+start, which wakes a session that is "offline"
+// (no active device). Premium required, as with all transport control.
+static bool forcePlayOnDevice() {
+  if (!ensureToken()) return false;
+  HttpResp r = httpDo("GET", "https://api.spotify.com/v1/me/player/devices",
+                      "", nullptr, accessToken, 1);
+  if (r.status != 200) { Serial.printf("SPOT: devices -> %d\n", r.status); return false; }
+  JsonDocument doc;
+  if (deserializeJson(doc, r.body)) return false;
+  JsonArray devs = doc["devices"].as<JsonArray>();
+  const char *pick = nullptr, *pickName = "";
+  int pickScore = -1;
+  for (JsonObject d : devs) {
+    const char *id   = d["id"] | "";
+    const char *type = d["type"] | "";
+    bool active      = d["is_active"] | false;
+    bool restricted  = d["is_restricted"] | false;
+    if (!id[0] || restricted) continue;
+    int score = active ? 3 : (strcasecmp(type, "Computer") == 0 ? 2 : 1);
+    if (score > pickScore) { pickScore = score; pick = id; pickName = d["name"] | ""; }
+  }
+  if (!pick) { Serial.println("SPOT: no playable device"); return false; }
+  Serial.printf("SPOT: force play on \"%s\"\n", pickName);
+  int st = control("PUT", String("/v1/me/player/play?device_id=") + pick, "");
+  if (ok2xx(st)) {
+    SpLock lk;
+    snap.isPlaying = true;
+    snap.playback  = SpotifyPlayback::Playing;
+    return true;
+  }
+  return false;
+}
+
 static void runCommand(SpotifyCmd cmd, int16_t arg) {
   bool     playing; uint8_t vol; bool hasVol;
   { SpLock lk; playing = snap.isPlaying; vol = snap.volumePct; hasVol = snap.hasVolume; }
 
   switch (cmd) {
     case SpotifyCmd::PlayPause: {
+      SpotifyPlayback pb; { SpLock lk; pb = snap.playback; }
+      // No active device (Idle/204): a bare /play 404s. Find a device and
+      // target it explicitly — this transfers playback AND starts it, so
+      // "play" works even when Spotify is closed everywhere.
+      if (!playing && (pb == SpotifyPlayback::Idle || pb == SpotifyPlayback::Unknown)) {
+        if (forcePlayOnDevice()) break;
+        // fall through to the plain attempt if no device was found
+      }
       int st = control("PUT", playing ? "/v1/me/player/pause" : "/v1/me/player/play", "");
       // Only commit the optimistic flip if the server accepted it; otherwise the
       // next poll reconciles back to reality.
@@ -634,13 +695,17 @@ static void serviceTask(void *) {
         nextPollMs = millis() + 1000;
       } else {
         // Drain queued transport commands (bounded so a burst can't monopolise
-        // the task on a slow link; leftovers run next cycle).
+        // the task on a slow link; leftovers run next cycle). After any
+        // command, poll almost immediately so the UI reconciles fast.
         SpotifyCmdMsg msg;
+        bool ranCmd = false;
         for (int n = 0; n < 4 && cmdQueue &&
                         xQueueReceive(cmdQueue, &msg, 0) == pdPASS; n++) {
           esp_task_wdt_reset();
           runCommand(msg.cmd, msg.arg);
+          ranCmd = true;
         }
+        if (ranCmd) nextPollMs = millis() + 400;
         // Poll now-playing on cadence, with backoff + Offline on repeated error.
         if ((int32_t)(millis() - nextPollMs) >= 0) {
           int retryAfter = 0;
@@ -668,7 +733,11 @@ static void serviceTask(void *) {
       }
     }
 
-    vTaskDelay(pdMS_TO_TICKS(120));
+    {
+      SpotifyCmdMsg peeked;
+      if (cmdQueue) xQueuePeek(cmdQueue, &peeked, pdMS_TO_TICKS(120));
+      else          vTaskDelay(pdMS_TO_TICKS(120));
+    }
   }
 }
 

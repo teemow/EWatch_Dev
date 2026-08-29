@@ -11,6 +11,7 @@
 #include "ui_kit.h"
 #include "system_views.h"
 #include "smicon_bg.h"     // SMICON_BG  240x280 logo watermark
+#include "photo_store.h"   // user background photo (preferred when set)
 
 // Backlight while the screensaver is up: a fraction of the user's setting so
 // it's noticeably softer than the watch face but not pitch black. Floored so
@@ -55,8 +56,10 @@ public:
   void render() override {
     if (!gfx) return;
     if (drawn) return;                   // static — nothing changes per frame
-    gfx->draw16bitRGBBitmap(0, 0, (uint16_t *)SMICON_BG,
-                            SMICON_BG_W, SMICON_BG_H);
+    const uint16_t *bg = photoBgGet();   // render task: safe to decode here
+    if (bg) gfx->draw16bitRGBBitmap(0, 0, (uint16_t *)bg, 240, 280);
+    else    gfx->draw16bitRGBBitmap(0, 0, (uint16_t *)SMICON_BG,
+                                    SMICON_BG_W, SMICON_BG_H);
     drawn = true;
   }
 

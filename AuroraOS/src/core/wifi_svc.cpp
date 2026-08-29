@@ -18,6 +18,7 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <ESPmDNS.h>
+#include <LittleFS.h>
 #include <esp_wifi.h>
 #include <esp_sntp.h>
 #include <esp_task_wdt.h>
@@ -28,6 +29,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "model.h"
+#include "photo_store.h"
 #include "storage.h"
 #include "display.h"          // backlightSet for the brightness slider
 #include "haptic.h"           // hapticSetStrengthPct on save
@@ -329,6 +331,58 @@ static String htmlPage() {
          "</fieldset>");
 #endif
 
+  // ===== Photos (upload / gallery / background) =====
+  h += F("<fieldset><legend>Photos</legend>"
+         "<p class=muted>Images are resized to 240&times;280 in your browser "
+         "before upload. Long-press a photo on the watch (or use Set BG here) "
+         "to make it the Photo face + screensaver background.</p>"
+         "<input type=file id=photoFile accept='image/*'>"
+         "<button type=button onclick='upPhoto()'>Upload</button>"
+         "<span id=photoStat class=muted></span>"
+         "<script>"
+         "function upPhoto(){var f=document.getElementById('photoFile').files[0];"
+         "if(!f)return;var st=document.getElementById('photoStat');st.textContent=' resizing...';"
+         "var img=new Image();img.onload=function(){"
+         "var c=document.createElement('canvas');c.width=240;c.height=280;"
+         "var x=c.getContext('2d');"
+         "var s=Math.max(240/img.width,280/img.height);"
+         "var w=img.width*s,hh=img.height*s;"
+         "x.drawImage(img,(240-w)/2,(280-hh)/2,w,hh);"
+         "c.toBlob(function(b){st.textContent=' uploading...';"
+         "var fd=new FormData();fd.append('file',b,'p.jpg');"
+         "fetch('/media/upload',{method:'POST',body:fd}).then(function(r){"
+         "if(r.ok)location.reload();else st.textContent=' failed: '+r.status;});"
+         "},'image/jpeg',0.85);};"
+         "img.src=URL.createObjectURL(f);}"
+         "</script><div>");
+  {
+    photoRefresh();
+    int np = photoCount();
+    for (int i = 0; i < np; i++) {
+      char nm[16];
+      if (!photoName(i, nm)) continue;
+      bool isBg = (strcmp(nm, photoBgName()) == 0);
+      h += "<div style='display:inline-block;margin:4px;text-align:center'>";
+      h += "<img src='/media/img?f="; h += nm;
+      h += "' width=60 height=70 style='display:block;border-radius:6px";
+      if (isBg) h += ";outline:3px solid #4a5";
+      h += "'>";
+      h += "<form method=POST action=/media/bg style='display:inline'>"
+           "<input type=hidden name=f value='"; h += nm; h += "'>"
+           "<button style='padding:2px 6px'>"; h += isBg ? "BG &#10003;" : "Set BG"; h += "</button></form>";
+      h += "<form method=POST action=/media/del style='display:inline'>"
+           "<input type=hidden name=f value='"; h += nm; h += "'>"
+           "<button class=warn style='padding:2px 6px'>X</button></form>";
+      h += "</div>";
+    }
+    char freeLine[64];
+    snprintf(freeLine, sizeof freeLine,
+             "</div><p class=muted>%d/%d photos, %u KB free</p>",
+             np, PHOTO_MAX, (unsigned)(photoFsFree() / 1024));
+    h += freeLine;
+  }
+  h += F("</fieldset>");
+
   // ===== Display + Sleep + RTC settings =====
   h += "<form method=POST action=/save>";
 
@@ -584,6 +638,89 @@ static void handleSpotifyLogout() {
 }
 #endif
 
+// ---------- Photos ----------
+static File   sUpFile;
+static char   sUpName[16];
+static size_t sUpBytes = 0;
+static bool   sUpFailed = false;
+
+static void handleMediaUploadDone() {
+  lastHttpMs = millis();
+  if (sUpFailed) { server.send(507, "text/plain", "upload failed (full?)"); return; }
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+static void handleMediaUploadChunk() {
+  lastHttpMs = millis();
+  HTTPUpload &up = server.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    sUpFailed = false; sUpBytes = 0;
+    if (!photoNextSlot(sUpName) || photoFsFree() < PHOTO_MAX_BYTES + 16 * 1024) {
+      sUpFailed = true;                 // no slot / not enough space
+      return;
+    }
+    char path[24];
+    snprintf(path, sizeof path, "/img/%s", sUpName);
+    sUpFile = LittleFS.open(path, "w");
+    if (!sUpFile) sUpFailed = true;
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (sUpFailed) return;
+    sUpBytes += up.currentSize;
+    if (sUpBytes > PHOTO_MAX_BYTES ||
+        sUpFile.write(up.buf, up.currentSize) != up.currentSize) {
+      sUpFailed = true;
+      sUpFile.close();
+      char path[24];
+      snprintf(path, sizeof path, "/img/%s", sUpName);
+      LittleFS.remove(path);
+    }
+  } else if (up.status == UPLOAD_FILE_END) {
+    if (!sUpFailed) {
+      sUpFile.close();
+      photoRefresh();
+      EWLOGI("PHOTO", "upload \"%s\" %u bytes", sUpName, (unsigned)sUpBytes);
+    }
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    if (sUpFile) sUpFile.close();
+    char path[24];
+    snprintf(path, sizeof path, "/img/%s", sUpName);
+    LittleFS.remove(path);
+    sUpFailed = true;
+  }
+}
+
+static void handleMediaImg() {
+  lastHttpMs = millis();
+  String f = server.arg("f");
+  if (f.indexOf("..") >= 0 || f.indexOf('/') >= 0 || !f.endsWith(".jpg")) {
+    server.send(400, "text/plain", "bad name"); return;
+  }
+  String path = String("/img/") + f;
+  File file = LittleFS.open(path, "r");
+  if (!file) { server.send(404, "text/plain", "not found"); return; }
+  server.streamFile(file, "image/jpeg");
+  file.close();
+}
+
+static void handleMediaDel() {
+  lastHttpMs = millis();
+  photoDelete(server.arg("f").c_str());
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+static void handleMediaBg() {
+  lastHttpMs = millis();
+  String f = server.arg("f");
+  // Toggle: setting the current bg again clears it (back to SM logo).
+  if (f == photoBgName()) photoSetBg("");
+  else                    photoSetBg(f.c_str());
+  { ModelLock lk; model.revision++; }        // repaint the face
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
 // Trigger SNTP, wait for a valid epoch, then push it through to the RTC. Only
 // meaningful when the watch is on a network with internet access (AP mode is
 // LAN-only, so we refuse there rather than waste the user's 5 s).
@@ -669,6 +806,10 @@ static void startServer() {
   server.on("/known/add",   HTTP_POST, handleKnownAdd);
   server.on("/known/del",   HTTP_POST, handleKnownDel);
   server.on("/known/scan",  HTTP_POST, handleKnownScan);
+  server.on("/media/upload", HTTP_POST, handleMediaUploadDone, handleMediaUploadChunk);
+  server.on("/media/img",   HTTP_GET,  handleMediaImg);
+  server.on("/media/del",   HTTP_POST, handleMediaDel);
+  server.on("/media/bg",    HTTP_POST, handleMediaBg);
 #if defined(EWATCH_ENABLE_SPOTIFY) && EWATCH_ENABLE_SPOTIFY
   server.on("/spotify/id",     HTTP_POST, handleSpotifyId);
   server.on("/spotify/code",   HTTP_POST, handleSpotifyCode);

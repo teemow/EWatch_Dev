@@ -31,6 +31,7 @@ enum class Screen : uint8_t {
   Boids,            // user app: flocking / starfield demo
   QuickSettings,    // control-centre sheet (swipe down from watch face)
   Torch,            // full-brightness white screen; blocks sleep while up
+  Gallery,          // Photos: LittleFS image gallery (web-uploaded)
   Doom,             // game: raycaster FPS (owns I2C while running)
   TunnelRacer,      // game: wireframe tunnel runner
   Starfox,          // game: on-rails wireframe space shooter
