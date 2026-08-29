@@ -307,6 +307,25 @@ void setup() {
     }
   }
 
+  // A panic reset (RTC_SW_CPU_RST) resets the CPU but NOT the GPIO matrix.
+  // A level-triggered wake interrupt left armed by the sleep path (e.g. BTN
+  // on GPIO18) then storms the moment the GPIO ISR service installs — with
+  // no handler to clear it, the IWDT fires and the chip resets again: a
+  // self-sustaining crash loop only a cold power cycle used to break.
+  // Disarm every interrupt-capable pin of ours before anything installs ISRs.
+  {
+    const gpio_num_t kIntPins[] = {
+      (gpio_num_t)PIN_BTN, (gpio_num_t)PIN_TOUCH_INT,
+      (gpio_num_t)PIN_MMA_INT1, (gpio_num_t)PIN_MMA_INT2,
+      (gpio_num_t)PIN_RTC_INT,
+    };
+    for (gpio_num_t pin : kIntPins) {
+      gpio_set_intr_type(pin, GPIO_INTR_DISABLE);
+      gpio_intr_disable(pin);
+      gpio_wakeup_disable(pin);
+    }
+  }
+
   // BEFORE anything else can hang: if the last 3 boots all ended in panic
   // or watchdog, drop the rail and stop. Otherwise the watch will sit there
   // burning battery in a hung loop the user can't break without pulling

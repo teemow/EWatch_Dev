@@ -653,6 +653,9 @@ static void handleMediaUploadDone() {
 
 static void handleMediaUploadChunk() {
   lastHttpMs = millis();
+  // This runs inside server.handleClient() on the WiFi task; a slow client
+  // can stretch one upload past the 20 s task WDT — keep it fed per chunk.
+  esp_task_wdt_reset();
   HTTPUpload &up = server.upload();
   if (up.status == UPLOAD_FILE_START) {
     sUpFailed = false; sUpBytes = 0;

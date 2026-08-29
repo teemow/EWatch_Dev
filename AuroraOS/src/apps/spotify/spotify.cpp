@@ -178,16 +178,27 @@ static void prepHttp(HTTPClient &h) {
 }
 
 // Persistent connection to api.spotify.com — the handshake is the latency.
+// The held TLS session costs ~45 KB of heap, which this firmware cannot
+// afford to park forever (an esp-sha alloc failure + wifi-task WDT hang
+// traced back to exactly that). Keep it only while actively used: the
+// service loop drops it after IDLE_DROP_MS without a request, and the
+// offline branch drops it immediately.
 static WiFiClientSecure *apiClient = nullptr;
+static uint32_t apiLastUseMs = 0;
+static const uint32_t API_IDLE_DROP_MS = 30000;
 static WiFiClientSecure *apiConn() {
   if (!apiClient) {
     apiClient = new WiFiClientSecure();
     prepTls(*apiClient);
   }
+  apiLastUseMs = millis();
   return apiClient;
 }
 static void apiConnDrop() {
   if (apiClient) { apiClient->stop(); }
+}
+static void apiConnIdleSweep() {
+  if (apiClient && millis() - apiLastUseMs > API_IDLE_DROP_MS) apiConnDrop();
 }
 // A connection/TLS error (negative) or a 5xx is worth retrying; auth/4xx and
 // 429 are definitive for the caller to handle (no blind retry).
@@ -691,6 +702,7 @@ static void serviceTask(void *) {
         // Offline: don't hammer the radio, and drop any queued commands so they
         // don't fire late (and wrong) when the link returns.
         { SpLock lk; snap.playback = SpotifyPlayback::Offline; }
+        apiConnDrop();                 // free the TLS heap while offline
         SpotifyCmdMsg drop; while (cmdQueue && xQueueReceive(cmdQueue, &drop, 0) == pdPASS) {}
         nextPollMs = millis() + 1000;
       } else {
@@ -733,6 +745,7 @@ static void serviceTask(void *) {
       }
     }
 
+    apiConnIdleSweep();                // reclaim TLS heap after 30 s unused
     {
       SpotifyCmdMsg peeked;
       if (cmdQueue) xQueuePeek(cmdQueue, &peeked, pdMS_TO_TICKS(120));
