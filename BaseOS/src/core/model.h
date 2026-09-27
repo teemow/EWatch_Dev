@@ -63,7 +63,10 @@ struct Model {
 
   // Auto-sleep: enter deep sleep after this many seconds of no input.
   // 0 disables auto-sleep entirely.
-  uint16_t sleepTimeoutSec = 5;
+#ifndef EWATCH_DEFAULT_SLEEP_SEC
+#define EWATCH_DEFAULT_SLEEP_SEC 5
+#endif
+  uint16_t sleepTimeoutSec = EWATCH_DEFAULT_SLEEP_SEC;
 
   // After this many seconds in deep sleep with no wake event, drop the LDO
   // latch and fully power off. 0 disables (sleep forever until wake source).

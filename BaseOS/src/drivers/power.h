@@ -30,5 +30,5 @@ static inline void unlatchPower() {
 }
 
 static inline bool buttonPressed() {
-  return digitalRead(PIN_BTN) == HIGH;
+  return digitalRead(PIN_BTN) == BTN_ACTIVE_LEVEL;
 }
