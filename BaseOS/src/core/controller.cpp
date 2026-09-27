@@ -29,6 +29,7 @@ void requestSetRTC(uint8_t h, uint8_t m, uint8_t s,
 
 // ---------- low-level I/O ----------
 static uint8_t mmaAddr = 0;
+static bool rtcPresent = false;
 
 static uint8_t bcd2dec(uint8_t b) { return (b >> 4) * 10 + (b & 0x0F); }
 static uint8_t dec2bcd(uint8_t d) { return ((d / 10) << 4) | (d % 10); }
@@ -125,7 +126,7 @@ bool readBattery(float &volts, uint8_t &pct) {
 
 // ---------- init ----------
 void controllerInit() {
-  pinMode(PIN_BTN,        INPUT);
+  pinMode(PIN_BTN,        BTN_ACTIVE_LEVEL == LOW ? INPUT_PULLUP : INPUT);
   pinMode(PIN_RTC_INT,    INPUT_PULLUP);
   pinMode(PIN_MMA_INT1,   INPUT);
   pinMode(PIN_MMA_INT2,   INPUT);
@@ -133,6 +134,7 @@ void controllerInit() {
   digitalWrite(PIN_BAT_MON_EN, LOW);
   analogSetPinAttenuation(PIN_BAT_MON_ADC, ADC_11db);
 
+  rtcPresent = i2cPing(I2C_ADDR_RV3028);   // skip the 12 Hz read (and its I2C timeouts) when absent
   if      (i2cPing(I2C_ADDR_MMA8451_A)) mmaAddr = I2C_ADDR_MMA8451_A;
   else if (i2cPing(I2C_ADDR_MMA8451_B)) mmaAddr = I2C_ADDR_MMA8451_B;
   mmaActivate();
@@ -251,7 +253,7 @@ static void taskIO(void *) {
     }
 
     // ---- Button (GPIO, no Wire) ----
-    bool btn = digitalRead(PIN_BTN);
+    bool btn = digitalRead(PIN_BTN) == BTN_ACTIVE_LEVEL;
     if (btn != lastBtn) {
       if (btn) {
         btnDownMs = millis();
@@ -302,7 +304,7 @@ static void taskIO(void *) {
     uint16_t yr = 2025;
     bool rtcOk = false;
     bool ranRtc = (cycle % 4 == 0);
-    if (ranRtc) rtcOk = readRTC(h, mm, s, wd, dy, mo, yr);
+    if (ranRtc && rtcPresent) rtcOk = readRTC(h, mm, s, wd, dy, mo, yr);
 
     float vbat = 0; uint8_t pct = 0; bool batOk = false;
     bool ranBat = (cycle % 50 == 0);
@@ -544,7 +546,11 @@ void enterDeepSleep() {
   uint64_t mask = 0;
   if (wkBtn) mask |= 1ULL << PIN_BTN;
   if (wkImu) mask |= 1ULL << PIN_MMA_INT1;
-  if (mask) esp_sleep_enable_ext1_wakeup(mask, ESP_EXT1_WAKEUP_ANY_HIGH);
+  // Active-low button (ws169 BOOT key): ALL_LOW only works while the mask holds
+  // just the button, which is the case on boards without the MMA8451.
+  if (mask) esp_sleep_enable_ext1_wakeup(mask, (BTN_ACTIVE_LEVEL == LOW && !wkImu)
+                                                   ? ESP_EXT1_WAKEUP_ALL_LOW
+                                                   : ESP_EXT1_WAKEUP_ANY_HIGH);
 
   // Timer wake-up. An armed countdown timer takes priority over the
   // auto-power-off interval: we wake exactly when it should alarm. Otherwise

@@ -174,7 +174,7 @@ static void showCrashScreenIfRecovering() {
   Serial.printf("\n!!! CRASH RECOVERY: previous reset reason = %s !!!\n", reason);
   if (!gfx) return;
 
-  pinMode(PIN_BTN, INPUT);
+  pinMode(PIN_BTN, BTN_ACTIVE_LEVEL == LOW ? INPUT_PULLUP : INPUT);
   backlightSet(160);
   gfx->fillScreen(0);
   gfx->fillRect(0, 0, 240, 36, 0xF800);            // red banner
@@ -207,7 +207,7 @@ static void showCrashScreenIfRecovering() {
 
   uint32_t t0 = millis();
   while (millis() - t0 < 8000) {
-    if (digitalRead(PIN_BTN)) break;
+    if (digitalRead(PIN_BTN) == BTN_ACTIVE_LEVEL) break;
     delay(50);
   }
   gfx->fillScreen(0);
@@ -240,7 +240,9 @@ static void reArmFromSpuriousWakeAndSleep() {
   uint64_t mask = 0;
   if (wkB) mask |= 1ULL << PIN_BTN;
   if (wkI) mask |= 1ULL << PIN_MMA_INT1;
-  if (mask) esp_sleep_enable_ext1_wakeup(mask, ESP_EXT1_WAKEUP_ANY_HIGH);
+  if (mask) esp_sleep_enable_ext1_wakeup(mask, (BTN_ACTIVE_LEVEL == LOW && !wkI)
+                                                   ? ESP_EXT1_WAKEUP_ALL_LOW
+                                                   : ESP_EXT1_WAKEUP_ANY_HIGH);
   if (toOff > 0) {
     esp_sleep_enable_timer_wakeup((uint64_t)toOff * 1000000ULL);
   }
